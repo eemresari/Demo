@@ -1,4 +1,4 @@
-﻿using Unity.FPS.Game;
+using Unity.FPS.Game;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -24,6 +24,9 @@ namespace Unity.FPS.Gameplay
         GameFlowManager m_GameFlowManager;
         PlayerCharacterController m_PlayerCharacterController;
         bool m_FireInputWasHeld;
+        bool m_AimInputWasHeld;
+        bool m_GrappleInputWasHeld;
+        bool m_SprintInputWasHeld;
 
         private InputAction m_MoveAction;
         private InputAction m_LookAction;
@@ -34,6 +37,8 @@ namespace Unity.FPS.Gameplay
         private InputAction m_CrouchAction;
         private InputAction m_ReloadAction;
         private InputAction m_NextWeaponAction;
+        private InputAction m_MeleeAction;
+        private InputAction m_GrappleAction;
 
         void Start()
         {
@@ -55,6 +60,8 @@ namespace Unity.FPS.Gameplay
             m_CrouchAction = InputSystem.actions.FindAction("Player/Crouch");
             m_ReloadAction = InputSystem.actions.FindAction("Player/Reload");
             m_NextWeaponAction = InputSystem.actions.FindAction("Player/NextWeapon");
+            m_MeleeAction = InputSystem.actions.FindAction("Player/Attack");
+            m_GrappleAction = InputSystem.actions.FindAction("Player/Grapple");
             
             m_MoveAction.Enable();
             m_LookAction.Enable();
@@ -65,11 +72,16 @@ namespace Unity.FPS.Gameplay
             m_CrouchAction.Enable();
             m_ReloadAction.Enable();
             m_NextWeaponAction.Enable();
+            m_MeleeAction.Enable();
+            m_GrappleAction.Enable();
         }
 
         void LateUpdate()
         {
             m_FireInputWasHeld = GetFireInputHeld();
+            m_AimInputWasHeld = GetAimInputHeld();
+            m_GrappleInputWasHeld = GetGrappleInputHeld();
+            m_SprintInputWasHeld = GetSprintInputHeld();
         }
 
         public bool CanProcessInput()
@@ -183,6 +195,48 @@ namespace Unity.FPS.Gameplay
             return false;
         }
 
+        // Bow draw uses the Aim action (right mouse): held = drawing, released = shoot
+        public bool GetAimInputDown()
+        {
+            return GetAimInputHeld() && !m_AimInputWasHeld;
+        }
+
+        public bool GetAimInputReleased()
+        {
+            return !GetAimInputHeld() && m_AimInputWasHeld;
+        }
+
+        // Melee uses the Attack action (left mouse)
+        public bool GetMeleeInputDown()
+        {
+            if (CanProcessInput())
+            {
+                return m_MeleeAction.WasPressedThisFrame();
+            }
+
+            return false;
+        }
+
+        public bool GetGrappleInputHeld()
+        {
+            if (CanProcessInput())
+            {
+                return m_GrappleAction.IsPressed();
+            }
+
+            return false;
+        }
+
+        public bool GetGrappleInputDown()
+        {
+            return GetGrappleInputHeld() && !m_GrappleInputWasHeld;
+        }
+
+        public bool GetGrappleInputReleased()
+        {
+            return !GetGrappleInputHeld() && m_GrappleInputWasHeld;
+        }
+
         public bool GetSprintInputHeld()
         {
             if (CanProcessInput())
@@ -191,6 +245,17 @@ namespace Unity.FPS.Gameplay
             }
 
             return false;
+        }
+
+        // Sprint button doubles as air-dash (press in the air, hold to aim in slow motion, release to dash)
+        public bool GetSprintInputDown()
+        {
+            return GetSprintInputHeld() && !m_SprintInputWasHeld;
+        }
+
+        public bool GetSprintInputReleased()
+        {
+            return !GetSprintInputHeld() && m_SprintInputWasHeld;
         }
 
         public bool GetCrouchInputDown()

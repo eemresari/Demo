@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using Unity.FPS.Game;
 using UnityEngine;
 using UnityEngine.Events;
@@ -72,9 +72,39 @@ namespace Unity.FPS.Gameplay
         [Tooltip("Layer to set FPS weapon gameObjects to")]
         public LayerMask FpsWeaponLayer;
 
+        [Header("Third Person")]
+        [Tooltip("Charge weapons (bow) are drawn with the Aim button and fire on release, instead of the Fire button")]
+        [SerializeField] private bool m_ShootWithAimButton = true;
+
+        [Tooltip("Allow switching weapons with scroll wheel / number keys")]
+        [SerializeField] private bool m_AllowWeaponSwitching = false;
+
+        [Tooltip("Rotate the weapon socket so the muzzle points at the crosshair target")]
+        [SerializeField] private bool m_AimSocketAtCrosshair = true;
+
+        [Tooltip("Aim point distance used when the crosshair ray hits nothing")]
+        [SerializeField] private float m_AimFallbackDistance = 100f;
+
+        [Tooltip("Aim points closer than this to the weapon are ignored (prevents the bow twisting when hugging walls)")]
+        [SerializeField] private float m_MinAimDistance = 2f;
+
         public bool IsAiming { get; private set; }
         public bool IsPointingAtEnemy { get; private set; }
         public int ActiveWeaponIndex { get; private set; }
+
+        /// <summary>World point under the crosshair (camera-center ray).</summary>
+        public Vector3 AimPoint { get; private set; }
+
+        /// <summary>Set by other systems (e.g. melee) to block bow input; cancels any draw in progress.</summary>
+        public bool IsShootingBlocked { get; set; }
+
+        /// <summary>Camera transform used for aiming / trajectory correction.</summary>
+        public Transform AimCameraTransform => WeaponCamera != null
+            ? WeaponCamera.transform
+            : m_PlayerCharacterController.PlayerCamera.transform;
+
+        /// <summary>A point safely inside the player, used to check that projectiles do not spawn inside walls.</summary>
+        public Vector3 ProjectileSafetyOrigin => m_PlayerCharacterController.CameraPivot.position;
 
         public UnityAction<WeaponController> OnSwitchedToWeapon;
         public UnityAction<WeaponController, int> OnAddedWeapon;
@@ -92,6 +122,9 @@ namespace Unity.FPS.Gameplay
         float m_TimeStartedWeaponSwitch;
         WeaponSwitchState m_WeaponSwitchState;
         int m_WeaponSwitchNewWeaponIndex;
+        ThirdPersonCameraRig m_CameraRig;
+        bool m_HasAimHit;
+        Collider m_AimHitCollider;
 
         void Start()
         {
@@ -105,6 +138,8 @@ namespace Unity.FPS.Gameplay
             m_PlayerCharacterController = GetComponent<PlayerCharacterController>();
             DebugUtility.HandleErrorIfNullGetComponent<PlayerCharacterController, PlayerWeaponsManager>(
                 m_PlayerCharacterController, this, gameObject);
+
+            m_CameraRig = GetComponent<ThirdPersonCameraRig>();
 
             SetFov(DefaultFov);
 
@@ -124,6 +159,8 @@ namespace Unity.FPS.Gameplay
             // shoot handling
             WeaponController activeWeapon = GetActiveWeapon();
 
+            UpdateAimPoint();
+
             if (activeWeapon != null && activeWeapon.IsReloading)
                 return;
 
@@ -135,14 +172,33 @@ namespace Unity.FPS.Gameplay
                     activeWeapon.StartReloadAnimation();
                     return;
                 }
-                // handle aiming down sights
-                IsAiming = m_InputHandler.GetAimInputHeld();
+                bool hasFired;
+                if (IsShootingBlocked)
+                {
+                    IsAiming = false;
+                    activeWeapon.CancelCharge();
+                    hasFired = false;
+                }
+                else if (m_ShootWithAimButton && activeWeapon.ShootType == WeaponShootType.Charge)
+                {
+                    // bow: hold Aim to draw (and zoom), release to shoot
+                    IsAiming = m_InputHandler.GetAimInputHeld();
+                    hasFired = activeWeapon.HandleShootInputs(
+                        m_InputHandler.GetAimInputDown(),
+                        m_InputHandler.GetAimInputHeld(),
+                        m_InputHandler.GetAimInputReleased());
+                }
+                else
+                {
+                    // handle aiming down sights
+                    IsAiming = m_InputHandler.GetAimInputHeld();
 
-                // handle shooting
-                bool hasFired = activeWeapon.HandleShootInputs(
-                    m_InputHandler.GetFireInputDown(),
-                    m_InputHandler.GetFireInputHeld(),
-                    m_InputHandler.GetFireInputReleased());
+                    // handle shooting
+                    hasFired = activeWeapon.HandleShootInputs(
+                        m_InputHandler.GetFireInputDown(),
+                        m_InputHandler.GetFireInputHeld(),
+                        m_InputHandler.GetFireInputReleased());
+                }
 
                 // Handle accumulating recoil
                 if (hasFired)
@@ -153,7 +209,7 @@ namespace Unity.FPS.Gameplay
             }
 
             // weapon switch handling
-            if (!IsAiming &&
+            if (m_AllowWeaponSwitching && !IsAiming &&
                 (activeWeapon == null || !activeWeapon.IsCharging) &&
                 (m_WeaponSwitchState == WeaponSwitchState.Up || m_WeaponSwitchState == WeaponSwitchState.Down))
             {
@@ -176,17 +232,56 @@ namespace Unity.FPS.Gameplay
 
             // Pointing at enemy handling
             IsPointingAtEnemy = false;
-            if (activeWeapon)
+            if (activeWeapon && m_HasAimHit && m_AimHitCollider != null)
             {
-                if (Physics.Raycast(WeaponCamera.transform.position, WeaponCamera.transform.forward, out RaycastHit hit,
-                    1000, -1, QueryTriggerInteraction.Ignore))
+                if (m_AimHitCollider.GetComponentInParent<Health>() != null)
                 {
-                    if (hit.collider.GetComponentInParent<Health>() != null)
-                    {
-                        IsPointingAtEnemy = true;
-                    }
+                    IsPointingAtEnemy = true;
                 }
             }
+        }
+
+        void UpdateAimPoint()
+        {
+            Transform cam = AimCameraTransform;
+            m_HasAimHit = false;
+            m_AimHitCollider = null;
+
+            if (m_CameraRig != null)
+            {
+                if (m_CameraRig.TryGetCrosshairHit(1000f, -1, QueryTriggerInteraction.Ignore, out RaycastHit rigHit))
+                {
+                    m_HasAimHit = true;
+                    m_AimHitCollider = rigHit.collider;
+                    AimPoint = rigHit.point;
+                    return;
+                }
+            }
+            else if (Physics.Raycast(cam.position, cam.forward, out RaycastHit hit, 1000, -1,
+                         QueryTriggerInteraction.Ignore))
+            {
+                m_HasAimHit = true;
+                m_AimHitCollider = hit.collider;
+                AimPoint = hit.point;
+                return;
+            }
+
+            AimPoint = cam.position + cam.forward * m_AimFallbackDistance;
+        }
+
+        void AimSocketAtCrosshair()
+        {
+            if (!m_AimSocketAtCrosshair || m_CameraRig == null)
+                return;
+
+            Vector3 toAim = AimPoint - WeaponParentSocket.position;
+            Transform cam = AimCameraTransform;
+            if (toAim.sqrMagnitude < m_MinAimDistance * m_MinAimDistance || Vector3.Dot(toAim, cam.forward) <= 0f)
+            {
+                toAim = cam.forward;
+            }
+
+            WeaponParentSocket.rotation = Quaternion.LookRotation(toAim, Vector3.up);
         }
 
 
@@ -201,13 +296,20 @@ namespace Unity.FPS.Gameplay
             // Set final weapon socket position based on all the combined animation influences
             WeaponParentSocket.localPosition =
                 m_WeaponMainLocalPosition + m_WeaponBobLocalPosition + m_WeaponRecoilLocalPosition;
+
+            AimSocketAtCrosshair();
         }
 
         // Sets the FOV of the main camera and the weapon camera simultaneously
         public void SetFov(float fov)
         {
+            // in third person the camera rig owns the field of view
+            if (m_CameraRig != null)
+                return;
+
             m_PlayerCharacterController.PlayerCamera.fieldOfView = fov;
-            WeaponCamera.fieldOfView = fov * WeaponFovMultiplier;
+            if (WeaponCamera != null)
+                WeaponCamera.fieldOfView = fov * WeaponFovMultiplier;
         }
 
         // Iterate on all weapon slots to find the next valid weapon to switch to

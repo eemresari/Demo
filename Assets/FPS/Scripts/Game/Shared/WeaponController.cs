@@ -107,6 +107,9 @@ namespace Unity.FPS.Game
         [Tooltip("Additional ammo used when charge reaches its maximum")]
         public float AmmoUsageRateWhileCharging = 1f;
 
+        [Tooltip("Releasing below this charge (0-1) cancels the shot and refunds the start ammo (bow minimum draw)")]
+        [Range(0f, 1f)] public float MinChargeToShoot = 0f;
+
         [Header("Audio & Visual")] 
         [Tooltip("Optional weapon animator for OnShoot animations")]
         public Animator WeaponAnimator;
@@ -426,6 +429,13 @@ namespace Unity.FPS.Game
         {
             if (IsCharging)
             {
+                // not drawn far enough: no shot
+                if (CurrentCharge < MinChargeToShoot)
+                {
+                    CancelCharge();
+                    return false;
+                }
+
                 HandleShoot();
 
                 CurrentCharge = 0f;
@@ -437,10 +447,25 @@ namespace Unity.FPS.Game
             return false;
         }
 
+        /// <summary>True while charging and the charge is high enough to shoot on release.</summary>
+        public bool IsChargeReadyToShoot => IsCharging && CurrentCharge >= MinChargeToShoot;
+
+        /// <summary>Aborts a charge in progress without shooting and refunds the ammo spent on start.</summary>
+        public void CancelCharge()
+        {
+            if (!IsCharging)
+                return;
+
+            m_CurrentAmmo = Mathf.Min(MaxAmmo, m_CurrentAmmo + AmmoUsedOnStartCharge);
+            CurrentCharge = 0f;
+            IsCharging = false;
+        }
+
         void HandleShoot()
         {
+            // a charge weapon always fires at least one projectile
             int bulletsPerShotFinal = ShootType == WeaponShootType.Charge
-                ? Mathf.CeilToInt(CurrentCharge * BulletsPerShot)
+                ? Mathf.Max(1, Mathf.CeilToInt(CurrentCharge * BulletsPerShot))
                 : BulletsPerShot;
 
             // spawn all bullets with random direction

@@ -24,6 +24,15 @@ namespace Unity.FPS.Gameplay
 
         void OnShoot()
         {
+            ApplyCharge();
+        }
+
+        /// <summary>
+        /// Applies charge-based values to the ProjectileStandard. Idempotent; ProjectileStandard calls it
+        /// before computing its velocity so the order of OnShoot subscribers does not matter.
+        /// </summary>
+        public void ApplyCharge()
+        {
             // Apply the parameters based on projectile charge
             ProjectileStandard proj = GetComponent<ProjectileStandard>();
             if (proj)

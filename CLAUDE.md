@@ -19,7 +19,7 @@ Input actions: `Assets/FPS/InputSystem_Actions.inputactions`. Scenes: `Assets/FP
 
 ## Tools available
 
-- **MCP for Unity** (`UnityMCP`, HTTP `127.0.0.1:8080/mcp`, registered in local scope): drives the open Editor — scenes, GameObjects, components, scripts, console, screenshots, play mode. Skill: `unity-mcp-orchestrator`. Requires Unity open with *Window → MCP for Unity* showing the server running.
+- **MCP for Unity** (`UnityMCP`, HTTP `127.0.0.1:8090/mcp` (8080 is taken by a Docker container), registered in local scope): drives the open Editor — scenes, GameObjects, components, scripts, console, screenshots, play mode. Skill: `unity-mcp-orchestrator`. Requires Unity open with *Window → MCP for Unity* showing the server running.
 - **Official Unity plugin** (`/unity:using-unity`): Unity's own skills (URP, UI, input, builds, Unity CLI…).
 - **awesome-gamedev skills** (project scope): unity-*, game-feel, camera-systems, level-design, fps-shooter, prototype-fast, etc.
 - **Subagents** in `.claude/agents/`: `unity-playtester`, `unity-debugger`, `unity-code-reviewer`.

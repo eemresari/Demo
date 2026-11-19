@@ -10,6 +10,10 @@ namespace Unity.FPS.Gameplay
         [Header("References")] [Tooltip("Reference to the main camera used for the player")]
         public Camera PlayerCamera;
 
+        [Tooltip("Third-person: transform that receives the camera pitch and height (camera is its child). " +
+                 "If empty, the camera itself is used (first-person behaviour).")]
+        [SerializeField] private Transform m_CameraPivot;
+
         [Tooltip("Audio source for footsteps, jump, etc...")]
         public AudioSource AudioSource;
 
@@ -38,6 +42,35 @@ namespace Unity.FPS.Gameplay
         [Tooltip("Acceleration speed when in the air")]
         public float AccelerationSpeedInAir = 25f;
 
+        [Tooltip("When horizontal air speed is above MaxSpeedInAir (e.g. after a grapple release), " +
+                 "it decays toward the max at this rate (m/s per second) instead of being clamped instantly")]
+        [SerializeField] private float m_AirMomentumDecay = 6f;
+
+        [Tooltip("Ground speed multiplier while aiming / drawing the bow")]
+        [Range(0.1f, 1f)] [SerializeField] private float m_AimingMoveSpeedMultiplier = 0.75f;
+
+        [Header("Slide (Crouch while moving fast)")]
+        [SerializeField] private bool m_SlideEnabled = true;
+
+        [Tooltip("Minimum horizontal speed to start a slide (otherwise Crouch just crouches)")]
+        [SerializeField] private float m_SlideMinStartSpeed = 9f;
+
+        [Tooltip("Speed added when the slide starts")]
+        [SerializeField] private float m_SlideBoost = 5f;
+
+        [SerializeField] private float m_SlideMaxSpeed = 32f;
+
+        [Tooltip("Deceleration on flat ground (m/s per second)")]
+        [SerializeField] private float m_SlideFriction = 7f;
+
+        [Tooltip("Slide ends below this speed")]
+        [SerializeField] private float m_SlideEndSpeed = 6f;
+
+        [Tooltip("How fast WASD can bend the slide direction (degrees per second)")]
+        [SerializeField] private float m_SlideSteering = 90f;
+
+        [SerializeField] private float m_SlideMaxDuration = 2.5f;
+
         [Tooltip("Multiplicator for the sprint speed (based on grounded speed)")]
         public float SprintSpeedModifier = 2f;
 
@@ -52,6 +85,15 @@ namespace Unity.FPS.Gameplay
 
         [Header("Jump")] [Tooltip("Force applied upward when jumping")]
         public float JumpForce = 9f;
+
+        [Tooltip("Extra jumps available in the air (1 = double jump). Refilled on landing and after a grapple pull.")]
+        [SerializeField] private int m_MaxAirJumps = 1;
+
+        [Tooltip("Upward speed of an air jump (sets vertical velocity, so it works even while falling)")]
+        [SerializeField] private float m_AirJumpForce = 11f;
+
+        [Tooltip("On an air jump, horizontal velocity is redirected toward the WASD direction (keeping at least this speed)")]
+        [SerializeField] private float m_AirJumpMinHorizontalSpeed = 8f;
 
         [Header("Stance")] [Tooltip("Ratio (0-1) of the character height where the camera will be at")]
         public float CameraHeightRatio = 0.9f;
@@ -103,6 +145,44 @@ namespace Unity.FPS.Gameplay
         public bool HasJumpedThisFrame { get; private set; }
         public bool IsDead { get; private set; }
         public bool IsCrouching { get; private set; }
+        public bool IsSliding { get; private set; }
+        public int AirJumpsLeft => m_AirJumpsLeft;
+
+        /// <summary>Another system used this frame's Jump press (e.g. grapple cancel): don't air-jump on it.</summary>
+        public void ConsumeJumpInputThisFrame()
+        {
+            m_JumpConsumedFrame = Time.frameCount;
+        }
+
+        /// <summary>Gives back the air jumps (e.g. after a grapple pull).</summary>
+        public void RefillAirJumps()
+        {
+            m_AirJumpsLeft = m_MaxAirJumps;
+        }
+
+        /// <summary>Transform that holds camera pitch (pivot in third person, camera in first person).</summary>
+        public Transform CameraPivot => m_CameraPivot != null ? m_CameraPivot : PlayerCamera.transform;
+
+        /// <summary>
+        /// True while an external system (grapple, melee lunge) drives CharacterVelocity this frame.
+        /// The controller then skips ground snapping, input acceleration, gravity and speed clamps,
+        /// and only moves the capsule + resolves collisions.
+        /// </summary>
+        public bool IsMovementOverridden => m_MovementOverrideFrame == Time.frameCount;
+
+        /// <summary>Call every frame (before this controller's Update) while driving velocity externally.</summary>
+        public void RequestMovementOverride()
+        {
+            m_MovementOverrideFrame = Time.frameCount;
+        }
+
+        /// <summary>Leaves the ground immediately and prevents ground snapping for a short time.</summary>
+        public void ForceUngrounded()
+        {
+            m_LastTimeJumped = Time.time;
+            IsGrounded = false;
+            m_GroundNormal = Vector3.up;
+        }
 
         public float RotationMultiplier
         {
@@ -129,6 +209,10 @@ namespace Unity.FPS.Gameplay
         float m_CameraVerticalAngle = 0f;
         float m_FootstepDistanceCounter;
         float m_TargetCharacterHeight;
+        int m_MovementOverrideFrame = -1;
+        float m_SlideStartTime;
+        int m_AirJumpsLeft;
+        int m_JumpConsumedFrame = -1;
 
         const float k_JumpGroundingPreventionTime = 0.2f;
         const float k_GroundCheckDistanceInAir = 0.07f;
@@ -181,7 +265,18 @@ namespace Unity.FPS.Gameplay
             HasJumpedThisFrame = false;
 
             bool wasGrounded = IsGrounded;
-            GroundCheck();
+            if (IsMovementOverridden)
+            {
+                IsGrounded = false;
+                m_GroundNormal = Vector3.up;
+            }
+            else
+            {
+                GroundCheck();
+            }
+
+            if (IsGrounded)
+                m_AirJumpsLeft = m_MaxAirJumps;
 
             // landing
             if (IsGrounded && !wasGrounded)
@@ -208,7 +303,12 @@ namespace Unity.FPS.Gameplay
             // crouching
             if (m_InputHandler.GetCrouchInputDown())
             {
-                SetCrouchingState(!IsCrouching, false);
+                if (IsSliding)
+                    StopSlide();
+                else if (CanStartSlide())
+                    StartSlide();
+                else
+                    SetCrouchingState(!IsCrouching, false);
             }
 
             UpdateCharacterHeight(false);
@@ -282,14 +382,20 @@ namespace Unity.FPS.Gameplay
                 // limit the camera's vertical angle to min/max
                 m_CameraVerticalAngle = Mathf.Clamp(m_CameraVerticalAngle, -89f, 89f);
 
-                // apply the vertical angle as a local rotation to the camera transform along its right axis (makes it pivot up and down)
-                PlayerCamera.transform.localEulerAngles = new Vector3(m_CameraVerticalAngle, 0, 0);
+                // apply the vertical angle as a local rotation to the camera pivot along its right axis (makes it pivot up and down)
+                CameraPivot.localEulerAngles = new Vector3(m_CameraVerticalAngle, 0, 0);
             }
 
             // character movement handling
             bool isSprinting = m_InputHandler.GetSprintInputHeld();
+            if (IsMovementOverridden && IsSliding)
             {
-                if (isSprinting)
+                StopSlide();
+            }
+
+            if (!IsMovementOverridden)
+            {
+                if (isSprinting && !IsSliding)
                 {
                     isSprinting = SetCrouchingState(false, false);
                 }
@@ -307,12 +413,21 @@ namespace Unity.FPS.Gameplay
                     // reduce speed if crouching by crouch speed ratio
                     if (IsCrouching)
                         targetVelocity *= MaxSpeedCrouchedRatio;
+                    if (m_WeaponsManager.IsAiming)
+                        targetVelocity *= m_AimingMoveSpeedMultiplier;
                     targetVelocity = GetDirectionReorientedOnSlope(targetVelocity.normalized, m_GroundNormal) *
                                      targetVelocity.magnitude;
 
-                    // smoothly interpolate between our current velocity and the target velocity based on acceleration speed
-                    CharacterVelocity = Vector3.Lerp(CharacterVelocity, targetVelocity,
-                        MovementSharpnessOnGround * Time.deltaTime);
+                    if (IsSliding)
+                    {
+                        UpdateSlide(worldspaceMoveInput);
+                    }
+                    else
+                    {
+                        // smoothly interpolate between our current velocity and the target velocity based on acceleration speed
+                        CharacterVelocity = Vector3.Lerp(CharacterVelocity, targetVelocity,
+                            MovementSharpnessOnGround * Time.deltaTime);
+                    }
 
                     // jumping
                     if (IsGrounded && m_InputHandler.GetJumpInputDown())
@@ -320,6 +435,9 @@ namespace Unity.FPS.Gameplay
                         // force the crouch state to false
                         if (SetCrouchingState(false, false))
                         {
+                            // slide-jump keeps the slide's horizontal momentum
+                            IsSliding = false;
+
                             // start by canceling out the vertical component of our velocity
                             CharacterVelocity = new Vector3(CharacterVelocity.x, 0f, CharacterVelocity.z);
 
@@ -342,7 +460,7 @@ namespace Unity.FPS.Gameplay
                     // footsteps sound
                     float chosenFootstepSfxFrequency =
                         (isSprinting ? FootstepSfxFrequencyWhileSprinting : FootstepSfxFrequency);
-                    if (m_FootstepDistanceCounter >= 1f / chosenFootstepSfxFrequency)
+                    if (!IsSliding && m_FootstepDistanceCounter >= 1f / chosenFootstepSfxFrequency)
                     {
                         m_FootstepDistanceCounter = 0f;
                         AudioSource.PlayOneShot(FootstepSfx);
@@ -354,13 +472,32 @@ namespace Unity.FPS.Gameplay
                 // handle air movement
                 else
                 {
+                    // sliding off a ledge ends the slide (momentum is kept)
+                    if (IsSliding)
+                        StopSlide();
+
+                    // double jump
+                    if (m_AirJumpsLeft > 0 && m_JumpConsumedFrame != Time.frameCount &&
+                        m_InputHandler.GetJumpInputDown())
+                    {
+                        DoAirJump(worldspaceMoveInput);
+                    }
+
                     // add air acceleration
                     CharacterVelocity += worldspaceMoveInput * AccelerationSpeedInAir * Time.deltaTime;
 
-                    // limit air speed to a maximum, but only horizontally
+                    // limit air speed to a maximum, but only horizontally. Speed above the max (grapple
+                    // momentum) decays smoothly instead of being clamped instantly.
                     float verticalVelocity = CharacterVelocity.y;
                     Vector3 horizontalVelocity = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up);
-                    horizontalVelocity = Vector3.ClampMagnitude(horizontalVelocity, MaxSpeedInAir * speedModifier);
+                    float maxAirSpeed = MaxSpeedInAir * speedModifier;
+                    float horizontalSpeed = horizontalVelocity.magnitude;
+                    if (horizontalSpeed > maxAirSpeed)
+                    {
+                        float decayedSpeed = Mathf.Max(maxAirSpeed,
+                            horizontalSpeed - m_AirMomentumDecay * Time.deltaTime);
+                        horizontalVelocity = horizontalVelocity / horizontalSpeed * decayedSpeed;
+                    }
                     CharacterVelocity = horizontalVelocity + (Vector3.up * verticalVelocity);
 
                     // apply the gravity to the velocity
@@ -383,6 +520,90 @@ namespace Unity.FPS.Gameplay
                 m_LatestImpactSpeed = CharacterVelocity;
 
                 CharacterVelocity = Vector3.ProjectOnPlane(CharacterVelocity, hit.normal);
+            }
+        }
+
+        void DoAirJump(Vector3 worldspaceMoveInput)
+        {
+            m_AirJumpsLeft--;
+
+            Vector3 horizontal = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up);
+            Vector3 inputDir = Vector3.ProjectOnPlane(worldspaceMoveInput, Vector3.up);
+            if (inputDir.sqrMagnitude > 0.01f)
+            {
+                // redirect momentum toward the input direction (Ghostrunner-style air control)
+                float speed = Mathf.Max(horizontal.magnitude, m_AirJumpMinHorizontalSpeed);
+                horizontal = inputDir.normalized * speed;
+            }
+
+            CharacterVelocity = horizontal + Vector3.up * m_AirJumpForce;
+            m_LastTimeJumped = Time.time;
+            HasJumpedThisFrame = true;
+            if (AudioSource && JumpSfx)
+                AudioSource.PlayOneShot(JumpSfx);
+        }
+
+        bool CanStartSlide()
+        {
+            if (!m_SlideEnabled || !IsGrounded || IsMovementOverridden)
+                return false;
+
+            float horizontalSpeed = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up).magnitude;
+            return horizontalSpeed >= m_SlideMinStartSpeed;
+        }
+
+        void StartSlide()
+        {
+            Vector3 horizontal = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up);
+            Vector3 dir = horizontal.sqrMagnitude > 0.01f ? horizontal.normalized : transform.forward;
+            float speed = Mathf.Min(m_SlideMaxSpeed, horizontal.magnitude + m_SlideBoost);
+
+            IsSliding = true;
+            m_SlideStartTime = Time.time;
+            SetCrouchingState(true, true);
+            CharacterVelocity = GetDirectionReorientedOnSlope(dir, m_GroundNormal) * speed;
+        }
+
+        void StopSlide()
+        {
+            if (!IsSliding)
+                return;
+
+            IsSliding = false;
+            // stand up if there is room, otherwise stay crouched
+            SetCrouchingState(false, false);
+        }
+
+        void UpdateSlide(Vector3 worldspaceMoveInput)
+        {
+            float dt = Time.deltaTime;
+            Vector3 along = Vector3.ProjectOnPlane(CharacterVelocity, m_GroundNormal);
+            float speed = along.magnitude;
+            Vector3 dir = speed > 0.01f ? along / speed : transform.forward;
+
+            // gravity along the slope: accelerate downhill, decelerate uphill
+            Vector3 slopeGravity = Vector3.ProjectOnPlane(Vector3.down * GravityDownForce, m_GroundNormal);
+            Vector3 newVelocity = dir * speed + slopeGravity * dt;
+            speed = newVelocity.magnitude;
+            if (speed > 0.0001f)
+                dir = newVelocity / speed;
+
+            // friction
+            speed = Mathf.Max(0f, speed - m_SlideFriction * dt);
+
+            // light steering with WASD
+            Vector3 steer = Vector3.ProjectOnPlane(worldspaceMoveInput, m_GroundNormal);
+            if (steer.sqrMagnitude > 0.01f)
+            {
+                dir = Vector3.RotateTowards(dir, steer.normalized, m_SlideSteering * Mathf.Deg2Rad * dt, 0f);
+            }
+
+            speed = Mathf.Min(speed, m_SlideMaxSpeed);
+            CharacterVelocity = dir * speed;
+
+            if (speed < m_SlideEndSpeed || Time.time > m_SlideStartTime + m_SlideMaxDuration)
+            {
+                StopSlide();
             }
         }
 
@@ -418,7 +639,7 @@ namespace Unity.FPS.Gameplay
             {
                 m_Controller.height = m_TargetCharacterHeight;
                 m_Controller.center = Vector3.up * m_Controller.height * 0.5f;
-                PlayerCamera.transform.localPosition = Vector3.up * m_TargetCharacterHeight * CameraHeightRatio;
+                CameraPivot.localPosition = Vector3.up * m_TargetCharacterHeight * CameraHeightRatio;
                 m_Actor.AimPoint.transform.localPosition = m_Controller.center;
             }
             // Update smooth height
@@ -428,7 +649,7 @@ namespace Unity.FPS.Gameplay
                 m_Controller.height = Mathf.Lerp(m_Controller.height, m_TargetCharacterHeight,
                     CrouchingSharpness * Time.deltaTime);
                 m_Controller.center = Vector3.up * m_Controller.height * 0.5f;
-                PlayerCamera.transform.localPosition = Vector3.Lerp(PlayerCamera.transform.localPosition,
+                CameraPivot.localPosition = Vector3.Lerp(CameraPivot.localPosition,
                     Vector3.up * m_TargetCharacterHeight * CameraHeightRatio, CrouchingSharpness * Time.deltaTime);
                 m_Actor.AimPoint.transform.localPosition = m_Controller.center;
             }

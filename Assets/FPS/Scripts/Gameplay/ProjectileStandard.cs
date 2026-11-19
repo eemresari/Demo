@@ -52,6 +52,9 @@ namespace Unity.FPS.Gameplay
         [Tooltip("Area of damage. Keep empty if you don<t want area damage")]
         public DamageArea AreaOfDamage;
 
+        [Tooltip("Hit-stop duration when a (nearly) fully charged shot hits something damageable. 0 = off")]
+        [SerializeField] private float m_FullChargeHitStop = 0f;
+
         [Header("Debug")] [Tooltip("Color of the projectile radius debug view")]
         public Color RadiusColor = Color.cyan * 0.2f;
 
@@ -79,6 +82,13 @@ namespace Unity.FPS.Gameplay
 
         new void OnShoot()
         {
+            // charge parameters must be applied before the velocity is computed below
+            ProjectileChargeParameters chargeParameters = GetComponent<ProjectileChargeParameters>();
+            if (chargeParameters)
+            {
+                chargeParameters.ApplyCharge();
+            }
+
             m_ShootTime = Time.time;
             m_LastRootPosition = Root.position;
             m_Velocity = transform.forward * Speed;
@@ -95,11 +105,10 @@ namespace Unity.FPS.Gameplay
             {
                 m_HasTrajectoryOverride = true;
 
-                Vector3 cameraToMuzzle = (m_ProjectileBase.InitialPosition -
-                                          playerWeaponsManager.WeaponCamera.transform.position);
+                Transform aimCamera = playerWeaponsManager.AimCameraTransform;
+                Vector3 cameraToMuzzle = (m_ProjectileBase.InitialPosition - aimCamera.position);
 
-                m_TrajectoryCorrectionVector = Vector3.ProjectOnPlane(-cameraToMuzzle,
-                    playerWeaponsManager.WeaponCamera.transform.forward);
+                m_TrajectoryCorrectionVector = Vector3.ProjectOnPlane(-cameraToMuzzle, aimCamera.forward);
                 if (TrajectoryCorrectionDistance == 0)
                 {
                     transform.position += m_TrajectoryCorrectionVector;
@@ -110,8 +119,11 @@ namespace Unity.FPS.Gameplay
                     m_HasTrajectoryOverride = false;
                 }
 
-                if (Physics.Raycast(playerWeaponsManager.WeaponCamera.transform.position, cameraToMuzzle.normalized,
-                    out RaycastHit hit, cameraToMuzzle.magnitude, HittableLayers, k_TriggerInteraction))
+                // make sure nothing is between the player and the muzzle (projectile spawned inside a wall)
+                Vector3 safetyOrigin = playerWeaponsManager.ProjectileSafetyOrigin;
+                Vector3 originToMuzzle = m_ProjectileBase.InitialPosition - safetyOrigin;
+                if (Physics.Raycast(safetyOrigin, originToMuzzle.normalized,
+                    out RaycastHit hit, originToMuzzle.magnitude, HittableLayers, k_TriggerInteraction))
                 {
                     if (IsHitValid(hit))
                     {
@@ -236,6 +248,11 @@ namespace Unity.FPS.Gameplay
                 if (damageable)
                 {
                     damageable.InflictDamage(Damage, false, m_ProjectileBase.Owner);
+
+                    if (m_FullChargeHitStop > 0f && m_ProjectileBase.InitialCharge >= 0.95f)
+                    {
+                        HitStop.Request(m_FullChargeHitStop);
+                    }
                 }
             }
 
